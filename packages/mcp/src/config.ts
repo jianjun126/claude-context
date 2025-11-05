@@ -27,6 +27,7 @@ export interface ContextMcpConfig {
     enableBranchScan?: boolean;
     repoRoots?: string[];
     repositories: RepositoryConfiguration[];
+    maxBranchScan?: number;
 }
 
 export interface RepositoryConfiguration {
@@ -137,6 +138,24 @@ function parseBoolean(value: string | undefined): boolean | undefined {
         return undefined;
     }
     return ['1', 'true', 'yes', 'on'].includes(normalized);
+}
+
+function parseInteger(value: string | undefined): number | undefined {
+    if (value === undefined || value === null) {
+        return undefined;
+    }
+
+    const trimmed = value.trim();
+    if (trimmed.length === 0) {
+        return undefined;
+    }
+
+    const parsed = Number.parseInt(trimmed, 10);
+    if (!Number.isFinite(parsed)) {
+        return undefined;
+    }
+
+    return parsed;
 }
 
 function safeParseJSON<T>(value: string | undefined): T | null {
@@ -270,6 +289,8 @@ export function createMcpConfig(): ContextMcpConfig {
     const defaultBranch = envManager.get('CURRENT_BRANCH') || envManager.get('DEFAULT_BRANCH') || undefined;
     const defaultBaseBranch = envManager.get('BASE_BRANCH') || envManager.get('DEFAULT_BASE_BRANCH') || undefined;
     const enableBranchScan = parseBoolean(envManager.get('ENABLE_BRANCH_SCAN'));
+    const rawMaxBranchScan = parseInteger(envManager.get('MAX_BRANCH_SCAN'));
+    const maxBranchScan = rawMaxBranchScan !== undefined && rawMaxBranchScan > 0 ? rawMaxBranchScan : undefined;
     const repoRoots = parseRepoRoots();
     const repositories = buildRepositoryConfigurations(repoRoots, {
         repo: defaultRepo,
@@ -302,6 +323,7 @@ export function createMcpConfig(): ContextMcpConfig {
         enableBranchScan,
         repoRoots,
         repositories,
+        maxBranchScan,
     };
 
     return config;
@@ -318,6 +340,7 @@ export function logConfigurationSummary(config: ContextMcpConfig): void {
     console.log(`[MCP]   Default Repo: ${config.defaultRepo || 'NOT SET'}`);
     console.log(`[MCP]   Default Branch: ${config.defaultBranch || 'NOT SET'} (base: ${config.defaultBaseBranch || 'NOT SET'})`);
     console.log(`[MCP]   Branch Scan Enabled: ${config.enableBranchScan === undefined ? 'NOT SET' : config.enableBranchScan ? 'YES' : 'NO'}`);
+    console.log(`[MCP]   Branch Scan Limit: ${config.maxBranchScan === undefined ? 'NOT SET' : config.maxBranchScan}`);
     if (config.repositories.length > 0) {
         console.log(`[MCP]   Repositories (${config.repositories.length}):`);
         for (const repo of config.repositories) {

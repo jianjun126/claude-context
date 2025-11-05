@@ -105,6 +105,10 @@ export interface IndexingContextMetadata {
     summary?: string;
 }
 
+export interface IndexingOptions {
+    sourceRoot?: string;
+}
+
 export class Context {
     private embedding: Embedding;
     private vectorDatabase: VectorDatabase;
@@ -259,14 +263,17 @@ export class Context {
         codebasePath: string,
         progressCallback?: (progress: { phase: string; current: number; total: number; percentage: number }) => void,
         forceReindex: boolean = false,
-        metadata: IndexingContextMetadata = {}
+        metadata: IndexingContextMetadata = {},
+        options: IndexingOptions = {}
     ): Promise<{ indexedFiles: number; totalChunks: number; status: 'completed' | 'limit_reached' }> {
         const isHybrid = this.getIsHybrid();
         const searchType = isHybrid === true ? 'hybrid search' : 'semantic search';
         console.log(`[Context] 🚀 Starting to index codebase with ${searchType}: ${codebasePath}`);
 
+        const sourceRoot = options.sourceRoot ? path.resolve(options.sourceRoot) : codebasePath;
+
         // 1. Load ignore patterns from various ignore files
-        await this.loadIgnorePatterns(codebasePath);
+        await this.loadIgnorePatterns(sourceRoot);
 
         // 2. Check and prepare vector collection
         progressCallback?.({ phase: 'Preparing collection...', current: 0, total: 100, percentage: 0 });
@@ -275,7 +282,7 @@ export class Context {
 
         // 3. Recursively traverse codebase to get all supported files
         progressCallback?.({ phase: 'Scanning files...', current: 5, total: 100, percentage: 5 });
-        const codeFiles = await this.getCodeFiles(codebasePath);
+        const codeFiles = await this.getCodeFiles(sourceRoot);
         console.log(`[Context] 📁 Found ${codeFiles.length} code files`);
 
         if (codeFiles.length === 0) {
@@ -304,7 +311,8 @@ export class Context {
                     percentage: Math.round(progressPercentage)
                 });
             },
-            metadata
+            metadata,
+            options
         );
 
         console.log(`[Context] ✅ Codebase indexing completed! Processed ${result.processedFiles} files in total, generated ${result.totalChunks} code chunks`);
@@ -392,6 +400,66 @@ export class Context {
         progressCallback?.({ phase: 'Re-indexing complete!', current: totalChanges, total: totalChanges, percentage: 100 });
 
         return { added: added.length, removed: removed.length, modified: modified.length };
+    }
+
+    private escapeFilterValue(value: string): string {
+        return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    }
+
+    public async clearBranchDocuments(codebasePath: string, branch: string, repo?: string): Promise<number> {
+        const collectionName = this.getCollectionName(codebasePath);
+        const clauses: string[] = [`branch == "${this.escapeFilterValue(branch)}"`];
+        if (repo) {
+            clauses.unshift(`repo == "${this.escapeFilterValue(repo)}"`);
+        }
+
+        const filterExpr = clauses.join(' && ');
+        if (!filterExpr) {
+            return 0;
+        }
+
+        let totalDeleted = 0;
+        const batchSize = 16384;
+
+        while (true) {
+            let results: Record<string, any>[] = [];
+            try {
+                results = await this.vectorDatabase.query(collectionName, filterExpr, ['id'], batchSize);
+            } catch (error) {
+                console.warn(`[Context] ⚠️  Failed to query existing branch documents for cleanup:`, error);
+                break;
+            }
+
+            if (!results || results.length === 0) {
+                break;
+            }
+
+            const ids = results
+                .map(result => result.id as string)
+                .filter(id => typeof id === 'string' && id.length > 0);
+
+            if (ids.length === 0) {
+                break;
+            }
+
+            try {
+                await this.vectorDatabase.delete(collectionName, ids);
+                totalDeleted += ids.length;
+            } catch (error) {
+                console.warn(`[Context] ⚠️  Failed to delete existing branch documents:`, error);
+                break;
+            }
+
+            if (results.length < batchSize) {
+                break;
+            }
+        }
+
+        if (totalDeleted > 0) {
+            console.log(`[Context] 🧹 Cleared ${totalDeleted} documents for branch '${branch}'${repo ? ` in repo '${repo}'` : ''}`);
+        }
+
+        return totalDeleted;
     }
 
     private async deleteFileChunks(collectionName: string, relativePath: string): Promise<void> {
@@ -684,8 +752,10 @@ export class Context {
     /**
      * Recursively get all code files in the codebase
      */
-    private async getCodeFiles(codebasePath: string): Promise<string[]> {
+    private async getCodeFiles(scanRoot: string, ignoreBase?: string): Promise<string[]> {
         const files: string[] = [];
+        const normalizedScanRoot = path.resolve(scanRoot);
+        const baseForIgnore = ignoreBase ? path.resolve(ignoreBase) : normalizedScanRoot;
 
         const traverseDirectory = async (currentPath: string) => {
             const entries = await fs.promises.readdir(currentPath, { withFileTypes: true });
@@ -694,7 +764,7 @@ export class Context {
                 const fullPath = path.join(currentPath, entry.name);
 
                 // Check if path matches ignore patterns
-                if (this.matchesIgnorePattern(fullPath, codebasePath)) {
+                if (this.matchesIgnorePattern(fullPath, baseForIgnore)) {
                     continue;
                 }
 
@@ -709,7 +779,7 @@ export class Context {
             }
         };
 
-        await traverseDirectory(codebasePath);
+        await traverseDirectory(normalizedScanRoot);
         return files;
     }
 
@@ -724,12 +794,17 @@ export class Context {
         filePaths: string[],
         codebasePath: string,
         onFileProcessed?: (filePath: string, fileIndex: number, totalFiles: number) => void,
-        metadata: IndexingContextMetadata = {}
+        metadata: IndexingContextMetadata = {},
+        options: IndexingOptions = {}
     ): Promise<{ processedFiles: number; totalChunks: number; status: 'completed' | 'limit_reached' }> {
         const isHybrid = this.getIsHybrid();
         const EMBEDDING_BATCH_SIZE = Math.max(1, parseInt(envManager.get('EMBEDDING_BATCH_SIZE') || '100', 10));
         const CHUNK_LIMIT = 450000;
         console.log(`[Context] 🔧 Using EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE}`);
+
+        const sourceRoot = options.sourceRoot ? path.resolve(options.sourceRoot) : codebasePath;
+        const normalizedSourceRoot = path.resolve(sourceRoot);
+        const normalizedCanonicalRoot = path.resolve(codebasePath);
 
         let chunkBuffer: Array<{ chunk: CodeChunk; codebasePath: string; metadata: IndexingContextMetadata }> = [];
         let processedFiles = 0;
@@ -738,21 +813,32 @@ export class Context {
 
         for (let i = 0; i < filePaths.length; i++) {
             const filePath = filePaths[i];
+            const absoluteFilePath = path.resolve(filePath);
+            const relativeWithinSource = path.relative(normalizedSourceRoot, absoluteFilePath);
+
+            if (relativeWithinSource.startsWith('..')) {
+                console.warn(`[Context] ⚠️  Skipping file outside source root: ${absoluteFilePath}`);
+                continue;
+            }
+
+            const canonicalFilePath = path.resolve(normalizedCanonicalRoot, relativeWithinSource);
 
             try {
-                const content = await fs.promises.readFile(filePath, 'utf-8');
-                const language = this.getLanguageFromExtension(path.extname(filePath));
-                const chunks = await this.codeSplitter.split(content, language, filePath);
+                const content = await fs.promises.readFile(absoluteFilePath, 'utf-8');
+                const language = this.getLanguageFromExtension(path.extname(absoluteFilePath));
+                const chunks = await this.codeSplitter.split(content, language, absoluteFilePath);
 
                 // Log files with many chunks or large content
                 if (chunks.length > 50) {
-                    console.warn(`[Context] ⚠️  File ${filePath} generated ${chunks.length} chunks (${Math.round(content.length / 1024)}KB)`);
+                    console.warn(`[Context] ⚠️  File ${absoluteFilePath} generated ${chunks.length} chunks (${Math.round(content.length / 1024)}KB)`);
                 } else if (content.length > 100000) {
-                    console.log(`📄 Large file ${filePath}: ${Math.round(content.length / 1024)}KB -> ${chunks.length} chunks`);
+                    console.log(`📄 Large file ${absoluteFilePath}: ${Math.round(content.length / 1024)}KB -> ${chunks.length} chunks`);
                 }
 
                 // Add chunks to buffer
                 for (const chunk of chunks) {
+                    chunk.metadata.filePath = canonicalFilePath;
+
                     chunkBuffer.push({ chunk, codebasePath, metadata });
                     totalChunks++;
 
@@ -780,7 +866,7 @@ export class Context {
                 }
 
                 processedFiles++;
-                onFileProcessed?.(filePath, i + 1, filePaths.length);
+                onFileProcessed?.(canonicalFilePath, i + 1, filePaths.length);
 
                 if (limitReached) {
                     break; // Exit the outer loop (over files)

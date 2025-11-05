@@ -117,6 +117,145 @@ export class ToolHandlers {
         this.indexingMetadataCache.set(ensureAbsolutePath(codebasePath), metadata);
     }
 
+    private shouldScanBranches(repoConfig?: RepositoryConfiguration): boolean {
+        if (!repoConfig) {
+            return false;
+        }
+
+        if (typeof repoConfig.scanBranches === 'boolean') {
+            return repoConfig.scanBranches;
+        }
+
+        if (typeof this.config.enableBranchScan === 'boolean') {
+            return this.config.enableBranchScan;
+        }
+
+        return false;
+    }
+
+    private getBranchScanLimit(): number | undefined {
+        const limit = this.config.maxBranchScan;
+        if (typeof limit === 'number' && limit > 0) {
+            return limit;
+        }
+        return undefined;
+    }
+
+    private async indexAdditionalBranches(
+        repoConfig: RepositoryConfiguration,
+        absolutePath: string,
+        baseMetadata: CodebaseMetadataFields,
+        snapshotMetadata: CodebaseMetadataFields
+    ): Promise<Array<{ branch: string; stats: { indexedFiles: number; totalChunks: number; status: 'completed' | 'limit_reached' } }>> {
+        if (!this.shouldScanBranches(repoConfig)) {
+            return [];
+        }
+
+        const repoName = baseMetadata.repo || repoConfig.name;
+        const ingestor = this.getBranchIngestorForRepo(repoConfig);
+
+        let branches: string[] = [];
+        try {
+            branches = await ingestor.listBranches(false);
+        } catch (error) {
+            console.warn(`[BACKGROUND-INDEX] Failed to list branches for '${repoConfig.name}':`, error);
+            return [];
+        }
+
+        const currentBranch = baseMetadata.branch || repoConfig.currentBranch || this.config.defaultBranch;
+        const baseBranch = baseMetadata.baseBranch || repoConfig.baseBranch || this.config.defaultBaseBranch;
+
+        const seen = new Set<string>();
+        const orderedBranches: string[] = [];
+        const pushBranch = (name?: string | null) => {
+            if (!name) {
+                return;
+            }
+            if (seen.has(name)) {
+                return;
+            }
+            seen.add(name);
+            orderedBranches.push(name);
+        };
+
+        if (baseBranch && baseBranch !== currentBranch) {
+            pushBranch(baseBranch);
+        }
+
+        for (const branch of branches) {
+            if (branch === currentBranch) {
+                continue;
+            }
+            pushBranch(branch);
+        }
+
+        if (orderedBranches.length === 0) {
+            console.log(`[BACKGROUND-INDEX] Branch scan enabled for '${repoConfig.name}', but no eligible branches were found.`);
+            return [];
+        }
+
+        const limit = this.getBranchScanLimit();
+        const targetBranches = typeof limit === 'number'
+            ? orderedBranches.slice(0, limit)
+            : orderedBranches;
+
+        const processedBranches: Array<{ branch: string; stats: { indexedFiles: number; totalChunks: number; status: 'completed' | 'limit_reached' } }> = [];
+        const locationSuffix = snapshotMetadata.path && snapshotMetadata.path !== '.'
+            ? `:${snapshotMetadata.path}`
+            : '';
+
+        console.log(`[BACKGROUND-INDEX] Branch scan enabled for '${repoConfig.name}'. Target branches: ${targetBranches.join(', ')}`);
+
+        for (const branchName of targetBranches) {
+            console.log(`[BACKGROUND-INDEX] ▶️  Indexing branch '${branchName}' for repository '${repoConfig.name}'`);
+            try {
+                await ingestor.withBranchWorktree(branchName, async (worktreePath) => {
+                    const branchMetadata: IndexingContextMetadata = {
+                        repo: repoName,
+                        branch: branchName,
+                        baseBranch: baseBranch || branchName,
+                        path: baseMetadata.path || '.',
+                        kind: baseMetadata.kind || 'code',
+                    };
+
+                    const branchSnapshot: CodebaseMetadataFields = {
+                        ...snapshotMetadata,
+                        repo: repoName,
+                        branch: branchName,
+                        baseBranch: branchMetadata.baseBranch,
+                        summary: `${repoName}${locationSuffix}@${branchName}`
+                    };
+
+                    this.snapshotManager.setCodebaseIndexing(absolutePath, 0, branchSnapshot);
+                    this.snapshotManager.saveCodebaseSnapshot();
+
+                    const removed = await this.context.clearBranchDocuments(absolutePath, branchName, repoName);
+                    if (removed > 0) {
+                        console.log(`[BACKGROUND-INDEX] 🧹 Cleared ${removed} stale chunks for branch '${branchName}'.`);
+                    }
+
+                    const stats = await this.context.indexCodebase(
+                        absolutePath,
+                        undefined,
+                        false,
+                        branchMetadata,
+                        { sourceRoot: worktreePath }
+                    );
+
+                    console.log(`[BACKGROUND-INDEX] ✅ Indexed branch '${branchName}' (${stats.indexedFiles} files, ${stats.totalChunks} chunks).`);
+
+                    this.snapshotManager.setCodebaseIndexed(absolutePath, stats, branchSnapshot);
+                    this.snapshotManager.saveCodebaseSnapshot();
+                    processedBranches.push({ branch: branchName, stats });
+                });
+            } catch (error: any) {
+                console.error(`[BACKGROUND-INDEX] ❌ Error indexing branch '${branchName}' for repository '${repoConfig.name}':`, error?.message || error);
+            }
+        }
+
+        return processedBranches;
+    }
+
     private escapeFilterValue(value: string): string {
         return value.replace(/"/g, '\\"');
     }
@@ -585,9 +724,38 @@ export class ToolHandlers {
 
             this.snapshotManager.saveCodebaseSnapshot();
 
+            let branchIndexResults: Array<{ branch: string; stats: { indexedFiles: number; totalChunks: number; status: 'completed' | 'limit_reached' } }> = [];
+            const branchScanEnabled = repoConfig ? this.shouldScanBranches(repoConfig) : false;
+            if (repoConfig && branchScanEnabled) {
+                try {
+                    branchIndexResults = await this.indexAdditionalBranches(repoConfig, absolutePath, indexMetadata, snapshotMetadata);
+                } catch (branchError) {
+                    console.error(`[BACKGROUND-INDEX] Error during additional branch indexing for '${repoConfig.name}':`, branchError);
+                }
+
+                if (branchIndexResults.length > 0) {
+                    this.snapshotManager.setCodebaseIndexed(absolutePath, stats, snapshotMetadata);
+                    this.snapshotManager.saveCodebaseSnapshot();
+                }
+            }
+
             let message = `Background indexing completed for '${absolutePath}' using ${splitterType.toUpperCase()} splitter.\nIndexed ${stats.indexedFiles} files, ${stats.totalChunks} chunks.`;
             if (stats.status === 'limit_reached') {
                 message += `\n⚠️  Warning: Indexing stopped because the chunk limit (450,000) was reached. The index may be incomplete.`;
+            }
+
+            if (branchIndexResults.length > 0) {
+                const branchDetails = branchIndexResults.map(({ branch, stats: branchStats }) => {
+                    const limitNote = branchStats.status === 'limit_reached' ? ', limit reached' : '';
+                    return `${branch} (${branchStats.indexedFiles} files, ${branchStats.totalChunks} chunks${limitNote})`;
+                }).join('; ');
+                const additionalChunks = branchIndexResults.reduce((sum, item) => sum + item.stats.totalChunks, 0);
+                const additionalFiles = branchIndexResults.reduce((sum, item) => sum + item.stats.indexedFiles, 0);
+                message += `\n🔁 Indexed additional branches: ${branchDetails}.`;
+                message += `\nTotal chunks across indexed branches: ${stats.totalChunks + additionalChunks}.`;
+                this.indexingStats = { indexedFiles: stats.indexedFiles + additionalFiles, totalChunks: stats.totalChunks + additionalChunks };
+            } else if (branchScanEnabled) {
+                message += `\nBranch scanning was enabled, but no additional branches required indexing.`;
             }
 
             console.log(`[BACKGROUND-INDEX] ${message}`);

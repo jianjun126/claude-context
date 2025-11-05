@@ -1,6 +1,7 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import * as path from 'path';
+import { promises as fsPromises } from 'fs';
 
 const execFileAsync = promisify(execFile);
 
@@ -178,5 +179,71 @@ export class GitBranchIngestor {
         }
 
         return stats;
+    }
+
+    private sanitizeWorktreeName(branch: string): string {
+        return branch
+            .replace(/[\\/:*?"<>|]/g, '_')
+            .replace(/\s+/g, '_')
+            .replace(/_+/g, '_')
+            .replace(/^_+|_+$/g, '') || 'branch';
+    }
+
+    private getWorktreeBaseDir(): string {
+        return path.join(this.repoPath, '.context-worktrees');
+    }
+
+    private async ensureWorktreeBaseDir(): Promise<void> {
+        const baseDir = this.getWorktreeBaseDir();
+        await fsPromises.mkdir(baseDir, { recursive: true });
+    }
+
+    private async cleanupExistingWorktree(worktreePath: string): Promise<void> {
+        try {
+            await this.runGit(['worktree', 'remove', '--force', worktreePath]);
+        } catch (error) {
+            // Ignore failures here; directory removal below will handle leftovers.
+        }
+
+        try {
+            await fsPromises.rm(worktreePath, { recursive: true, force: true });
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+                console.warn(`[GitBranchIngestor] Failed to remove existing worktree directory ${worktreePath}:`, error);
+            }
+        }
+    }
+
+    async withBranchWorktree<T>(branch: string, callback: (worktreePath: string) => Promise<T>): Promise<T> {
+        await this.ensureWorktreeBaseDir();
+        const sanitized = this.sanitizeWorktreeName(branch);
+        const worktreePath = path.join(this.getWorktreeBaseDir(), sanitized);
+
+        await this.cleanupExistingWorktree(worktreePath);
+
+        try {
+            await this.runGit(['worktree', 'add', '--force', '--detach', worktreePath, branch]);
+        } catch (error) {
+            console.warn(`[GitBranchIngestor] Failed to create worktree for branch ${branch}:`, error);
+            throw error;
+        }
+
+        try {
+            return await callback(worktreePath);
+        } finally {
+            try {
+                await this.runGit(['worktree', 'remove', '--force', worktreePath]);
+            } catch (error) {
+                console.warn(`[GitBranchIngestor] Failed to detach worktree ${worktreePath}:`, error);
+            }
+
+            try {
+                await fsPromises.rm(worktreePath, { recursive: true, force: true });
+            } catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+                    console.warn(`[GitBranchIngestor] Failed to clean worktree directory ${worktreePath}:`, error);
+                }
+            }
+        }
     }
 }
