@@ -260,6 +260,42 @@ export class MilvusVectorDatabase implements VectorDatabase {
                 max_length: 32,
             },
             {
+                name: 'repo',
+                description: 'Repository identifier',
+                data_type: DataType.VarChar,
+                max_length: 256,
+            },
+            {
+                name: 'branch',
+                description: 'Branch identifier',
+                data_type: DataType.VarChar,
+                max_length: 256,
+            },
+            {
+                name: 'base_branch',
+                description: 'Base branch identifier',
+                data_type: DataType.VarChar,
+                max_length: 256,
+            },
+            {
+                name: 'path',
+                description: 'Path within repository',
+                data_type: DataType.VarChar,
+                max_length: 2048,
+            },
+            {
+                name: 'kind',
+                description: 'Chunk classification',
+                data_type: DataType.VarChar,
+                max_length: 128,
+            },
+            {
+                name: 'summary',
+                description: 'Chunk summary text',
+                data_type: DataType.VarChar,
+                max_length: 1024,
+            },
+            {
                 name: 'metadata',
                 description: 'Additional document metadata as JSON string',
                 data_type: DataType.VarChar,
@@ -359,6 +395,12 @@ export class MilvusVectorDatabase implements VectorDatabase {
             startLine: doc.startLine,
             endLine: doc.endLine,
             fileExtension: doc.fileExtension,
+            repo: doc.repo ?? '',
+            branch: doc.branch ?? '',
+            base_branch: doc.baseBranch ?? '',
+            path: doc.path ?? doc.relativePath,
+            kind: doc.kind ?? 'code',
+            summary: doc.summary ?? '',
             metadata: JSON.stringify(doc.metadata),
         }));
 
@@ -380,7 +422,7 @@ export class MilvusVectorDatabase implements VectorDatabase {
             collection_name: collectionName,
             data: [queryVector],
             limit: options?.topK || 10,
-            output_fields: ['id', 'content', 'relativePath', 'startLine', 'endLine', 'fileExtension', 'metadata'],
+            output_fields: ['id', 'content', 'relativePath', 'startLine', 'endLine', 'fileExtension', 'repo', 'branch', 'base_branch', 'path', 'kind', 'summary', 'metadata'],
         };
 
         // Apply boolean expression filter if provided (e.g., fileExtension in [".ts",".py"]) 
@@ -394,19 +436,35 @@ export class MilvusVectorDatabase implements VectorDatabase {
             return [];
         }
 
-        return searchResult.results.map((result: any) => ({
-            document: {
-                id: result.id,
-                vector: queryVector,
-                content: result.content,
-                relativePath: result.relativePath,
-                startLine: result.startLine,
-                endLine: result.endLine,
-                fileExtension: result.fileExtension,
-                metadata: JSON.parse(result.metadata || '{}'),
-            },
-            score: result.score,
-        }));
+        return searchResult.results.map((result: any) => {
+            let parsedMetadata: Record<string, any> = {};
+            try {
+                parsedMetadata = JSON.parse(result.metadata || '{}');
+            } catch (error) {
+                console.warn(`[MilvusDB] Failed to parse metadata for result ${result.id}:`, error);
+                parsedMetadata = {};
+            }
+
+            return {
+                document: {
+                    id: result.id,
+                    vector: queryVector,
+                    content: result.content,
+                    relativePath: result.relativePath,
+                    startLine: result.startLine,
+                    endLine: result.endLine,
+                    fileExtension: result.fileExtension,
+                    repo: result.repo ?? parsedMetadata['repo'],
+                    branch: result.branch ?? parsedMetadata['branch'],
+                    baseBranch: result.base_branch ?? parsedMetadata['baseBranch'] ?? parsedMetadata['base_branch'],
+                    path: result.path ?? parsedMetadata['path'] ?? result.relativePath,
+                    kind: result.kind ?? parsedMetadata['kind'],
+                    summary: result.summary ?? parsedMetadata['summary'],
+                    metadata: parsedMetadata,
+                },
+                score: result.score,
+            };
+        });
     }
 
     async delete(collectionName: string, ids: string[]): Promise<void> {
@@ -514,6 +572,42 @@ export class MilvusVectorDatabase implements VectorDatabase {
                 max_length: 32,
             },
             {
+                name: 'repo',
+                description: 'Repository identifier',
+                data_type: DataType.VarChar,
+                max_length: 256,
+            },
+            {
+                name: 'branch',
+                description: 'Branch identifier',
+                data_type: DataType.VarChar,
+                max_length: 256,
+            },
+            {
+                name: 'base_branch',
+                description: 'Base branch identifier',
+                data_type: DataType.VarChar,
+                max_length: 256,
+            },
+            {
+                name: 'path',
+                description: 'Path within repository',
+                data_type: DataType.VarChar,
+                max_length: 2048,
+            },
+            {
+                name: 'kind',
+                description: 'Chunk classification',
+                data_type: DataType.VarChar,
+                max_length: 128,
+            },
+            {
+                name: 'summary',
+                description: 'Chunk summary text',
+                data_type: DataType.VarChar,
+                max_length: 1024,
+            },
+            {
                 name: 'metadata',
                 description: 'Additional document metadata as JSON string',
                 data_type: DataType.VarChar,
@@ -601,6 +695,12 @@ export class MilvusVectorDatabase implements VectorDatabase {
             startLine: doc.startLine,
             endLine: doc.endLine,
             fileExtension: doc.fileExtension,
+            repo: doc.repo ?? '',
+            branch: doc.branch ?? '',
+            base_branch: doc.baseBranch ?? '',
+            path: doc.path ?? doc.relativePath,
+            kind: doc.kind ?? 'code',
+            summary: doc.summary ?? '',
             metadata: JSON.stringify(doc.metadata),
         }));
 
@@ -665,7 +765,7 @@ export class MilvusVectorDatabase implements VectorDatabase {
                 data: [search_param_1, search_param_2],
                 limit: options?.limit || searchRequests[0]?.limit || 10,
                 rerank: rerank_strategy,
-                output_fields: ['id', 'content', 'relativePath', 'startLine', 'endLine', 'fileExtension', 'metadata'],
+                output_fields: ['id', 'content', 'relativePath', 'startLine', 'endLine', 'fileExtension', 'repo', 'branch', 'base_branch', 'path', 'kind', 'summary', 'metadata'],
             };
 
             if (options?.filterExpr && options.filterExpr.trim().length > 0) {
@@ -693,20 +793,36 @@ export class MilvusVectorDatabase implements VectorDatabase {
             console.log(`[MilvusDB] ✅ Found ${searchResult.results.length} results from hybrid search`);
 
             // Transform results to HybridSearchResult format
-            return searchResult.results.map((result: any) => ({
-                document: {
-                    id: result.id,
-                    content: result.content,
-                    vector: [],
-                    sparse_vector: [],
-                    relativePath: result.relativePath,
-                    startLine: result.startLine,
-                    endLine: result.endLine,
-                    fileExtension: result.fileExtension,
-                    metadata: JSON.parse(result.metadata || '{}'),
-                },
-                score: result.score,
-            }));
+            return searchResult.results.map((result: any) => {
+                let parsedMetadata: Record<string, any> = {};
+                try {
+                    parsedMetadata = JSON.parse(result.metadata || '{}');
+                } catch (error) {
+                    console.warn(`[MilvusDB] Failed to parse hybrid metadata for result ${result.id}:`, error);
+                    parsedMetadata = {};
+                }
+
+                return {
+                    document: {
+                        id: result.id,
+                        content: result.content,
+                        vector: [],
+                        sparse_vector: [],
+                        relativePath: result.relativePath,
+                        startLine: result.startLine,
+                        endLine: result.endLine,
+                        fileExtension: result.fileExtension,
+                        repo: result.repo ?? parsedMetadata['repo'],
+                        branch: result.branch ?? parsedMetadata['branch'],
+                        baseBranch: result.base_branch ?? parsedMetadata['baseBranch'] ?? parsedMetadata['base_branch'],
+                        path: result.path ?? parsedMetadata['path'] ?? result.relativePath,
+                        kind: result.kind ?? parsedMetadata['kind'],
+                        summary: result.summary ?? parsedMetadata['summary'],
+                        metadata: parsedMetadata,
+                    },
+                    score: result.score,
+                };
+            });
 
         } catch (error) {
             console.error(`[MilvusDB] ❌ Failed to perform hybrid search on collection '${collectionName}':`, error);

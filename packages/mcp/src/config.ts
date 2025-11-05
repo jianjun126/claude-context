@@ -1,3 +1,5 @@
+import * as fs from "fs";
+import * as path from "path";
 import { envManager } from "@zilliz/claude-context-core";
 
 export interface ContextMcpConfig {
@@ -18,6 +20,22 @@ export interface ContextMcpConfig {
     // Vector database configuration
     milvusAddress?: string; // Optional, can be auto-resolved from token
     milvusToken?: string;
+    // Repository awareness
+    defaultRepo?: string;
+    defaultBranch?: string;
+    defaultBaseBranch?: string;
+    enableBranchScan?: boolean;
+    repoRoots?: string[];
+    repositories: RepositoryConfiguration[];
+    maxBranchScan?: number;
+}
+
+export interface RepositoryConfiguration {
+    name: string;
+    path: string;
+    baseBranch?: string;
+    currentBranch?: string;
+    scanBranches?: boolean;
 }
 
 // Legacy format (v1) - for backward compatibility
@@ -30,7 +48,16 @@ export interface CodebaseSnapshotV1 {
 // New format (v2) - structured with codebase information
 
 // Base interface for common fields
-interface CodebaseInfoBase {
+export interface CodebaseMetadataFields {
+    repo?: string;
+    branch?: string;
+    baseBranch?: string;
+    path?: string;
+    kind?: string;
+    summary?: string;
+}
+
+interface CodebaseInfoBase extends CodebaseMetadataFields {
     lastUpdated: string;
 }
 
@@ -102,6 +129,151 @@ export function getEmbeddingModelForProvider(provider: string): string {
     }
 }
 
+function parseBoolean(value: string | undefined): boolean | undefined {
+    if (value === undefined || value === null) {
+        return undefined;
+    }
+    const normalized = value.trim().toLowerCase();
+    if (normalized.length === 0) {
+        return undefined;
+    }
+    return ['1', 'true', 'yes', 'on'].includes(normalized);
+}
+
+function parseInteger(value: string | undefined): number | undefined {
+    if (value === undefined || value === null) {
+        return undefined;
+    }
+
+    const trimmed = value.trim();
+    if (trimmed.length === 0) {
+        return undefined;
+    }
+
+    const parsed = Number.parseInt(trimmed, 10);
+    if (!Number.isFinite(parsed)) {
+        return undefined;
+    }
+
+    return parsed;
+}
+
+function safeParseJSON<T>(value: string | undefined): T | null {
+    if (!value) {
+        return null;
+    }
+    try {
+        return JSON.parse(value) as T;
+    } catch (error) {
+        console.warn('[CONFIG] Failed to parse JSON configuration:', error);
+        return null;
+    }
+}
+
+function loadRepositoriesFromFile(filePath: string): RepositoryConfiguration[] {
+    if (!filePath) {
+        return [];
+    }
+
+    try {
+        const resolvedPath = path.resolve(filePath);
+        const contents = fs.readFileSync(resolvedPath, 'utf-8');
+
+        if (filePath.endsWith('.json')) {
+            const parsed = safeParseJSON<RepositoryConfiguration[]>(contents);
+            return parsed || [];
+        }
+
+        console.warn(`[CONFIG] Unsupported repository configuration format for ${filePath}. Only JSON is supported.`);
+        return [];
+    } catch (error) {
+        console.warn(`[CONFIG] Failed to load repository configuration from ${filePath}:`, error);
+        return [];
+    }
+}
+
+function parseRepoRoots(): string[] {
+    const roots: string[] = [];
+    const explicitRoots = envManager.get('REPO_ROOTS');
+    if (explicitRoots) {
+        roots.push(...explicitRoots.split(',').map(root => root.trim()).filter(root => root.length > 0));
+    }
+
+    const singleRoot = envManager.get('REPO_ROOT');
+    if (singleRoot) {
+        roots.push(singleRoot.trim());
+    }
+
+    return roots;
+}
+
+function buildRepositoryConfigurations(
+    repoRoots: string[],
+    defaults: { repo?: string; branch?: string; baseBranch?: string; enableBranchScan?: boolean }
+): RepositoryConfiguration[] {
+    const configs: RepositoryConfiguration[] = [];
+
+    const filePath = envManager.get('REPO_CONFIG_PATH');
+    if (filePath) {
+        configs.push(...loadRepositoriesFromFile(filePath));
+    }
+
+    const repoJson = safeParseJSON<RepositoryConfiguration[]>(envManager.get('REPOSITORIES_JSON'));
+    if (repoJson) {
+        configs.push(...repoJson);
+    }
+
+    const singleRepoPath = envManager.get('REPO_PATH') || envManager.get('REPO_ROOT');
+    if (singleRepoPath) {
+        configs.push({
+            name: defaults.repo || path.basename(path.resolve(singleRepoPath)),
+            path: singleRepoPath,
+            baseBranch: defaults.baseBranch,
+            currentBranch: defaults.branch,
+            scanBranches: defaults.enableBranchScan,
+        });
+    }
+
+    for (const root of repoRoots) {
+        configs.push({
+            name: path.basename(path.resolve(root)) || root,
+            path: root,
+            baseBranch: defaults.baseBranch,
+            currentBranch: defaults.branch,
+            scanBranches: defaults.enableBranchScan,
+        });
+    }
+
+    const deduped = new Map<string, RepositoryConfiguration>();
+    for (const cfg of configs) {
+        if (!cfg.path) {
+            continue;
+        }
+        const normalizedPath = path.resolve(cfg.path);
+        const existing = deduped.get(normalizedPath);
+        const merged: RepositoryConfiguration = {
+            ...(existing || {}),
+            ...cfg,
+            path: normalizedPath,
+            name: cfg.name || existing?.name || path.basename(normalizedPath),
+        };
+
+        if (merged.baseBranch === undefined && defaults.baseBranch) {
+            merged.baseBranch = defaults.baseBranch;
+        }
+        if (merged.currentBranch === undefined && defaults.branch) {
+            merged.currentBranch = defaults.branch;
+        }
+        if (merged.scanBranches === undefined && defaults.enableBranchScan !== undefined) {
+            merged.scanBranches = defaults.enableBranchScan;
+        }
+
+        deduped.set(normalizedPath, merged);
+    }
+
+    return Array.from(deduped.values());
+}
+
 export function createMcpConfig(): ContextMcpConfig {
     // Debug: Print all environment variables related to Context
     console.log(`[DEBUG] 🔍 Environment Variables Debug:`);
@@ -112,6 +284,20 @@ export function createMcpConfig(): ContextMcpConfig {
     console.log(`[DEBUG]   OPENAI_API_KEY: ${envManager.get('OPENAI_API_KEY') ? 'SET (length: ' + envManager.get('OPENAI_API_KEY')!.length + ')' : 'NOT SET'}`);
     console.log(`[DEBUG]   MILVUS_ADDRESS: ${envManager.get('MILVUS_ADDRESS') || 'NOT SET'}`);
     console.log(`[DEBUG]   NODE_ENV: ${envManager.get('NODE_ENV') || 'NOT SET'}`);
+
+    const defaultRepo = envManager.get('REPO_NAME') || envManager.get('DEFAULT_REPO') || undefined;
+    const defaultBranch = envManager.get('CURRENT_BRANCH') || envManager.get('DEFAULT_BRANCH') || undefined;
+    const defaultBaseBranch = envManager.get('BASE_BRANCH') || envManager.get('DEFAULT_BASE_BRANCH') || undefined;
+    const enableBranchScan = parseBoolean(envManager.get('ENABLE_BRANCH_SCAN'));
+    const rawMaxBranchScan = parseInteger(envManager.get('MAX_BRANCH_SCAN'));
+    const maxBranchScan = rawMaxBranchScan !== undefined && rawMaxBranchScan > 0 ? rawMaxBranchScan : undefined;
+    const repoRoots = parseRepoRoots();
+    const repositories = buildRepositoryConfigurations(repoRoots, {
+        repo: defaultRepo,
+        branch: defaultBranch,
+        baseBranch: defaultBaseBranch,
+        enableBranchScan,
+    });
 
     const config: ContextMcpConfig = {
         name: envManager.get('MCP_SERVER_NAME') || "Context MCP Server",
@@ -130,7 +316,14 @@ export function createMcpConfig(): ContextMcpConfig {
         ollamaHost: envManager.get('OLLAMA_HOST'),
         // Vector database configuration - address can be auto-resolved from token
         milvusAddress: envManager.get('MILVUS_ADDRESS'), // Optional, can be resolved from token
-        milvusToken: envManager.get('MILVUS_TOKEN')
+        milvusToken: envManager.get('MILVUS_TOKEN'),
+        defaultRepo,
+        defaultBranch,
+        defaultBaseBranch,
+        enableBranchScan,
+        repoRoots,
+        repositories,
+        maxBranchScan,
     };
 
     return config;
@@ -144,6 +337,18 @@ export function logConfigurationSummary(config: ContextMcpConfig): void {
     console.log(`[MCP]   Embedding Provider: ${config.embeddingProvider}`);
     console.log(`[MCP]   Embedding Model: ${config.embeddingModel}`);
     console.log(`[MCP]   Milvus Address: ${config.milvusAddress || (config.milvusToken ? '[Auto-resolve from token]' : '[Not configured]')}`);
+    console.log(`[MCP]   Default Repo: ${config.defaultRepo || 'NOT SET'}`);
+    console.log(`[MCP]   Default Branch: ${config.defaultBranch || 'NOT SET'} (base: ${config.defaultBaseBranch || 'NOT SET'})`);
+    console.log(`[MCP]   Branch Scan Enabled: ${config.enableBranchScan === undefined ? 'NOT SET' : config.enableBranchScan ? 'YES' : 'NO'}`);
+    console.log(`[MCP]   Branch Scan Limit: ${config.maxBranchScan === undefined ? 'NOT SET' : config.maxBranchScan}`);
+    if (config.repositories.length > 0) {
+        console.log(`[MCP]   Repositories (${config.repositories.length}):`);
+        for (const repo of config.repositories) {
+            console.log(`          - ${repo.name} @ ${repo.path} (branch=${repo.currentBranch || 'auto'}, base=${repo.baseBranch || 'auto'}, scan=${repo.scanBranches === undefined ? 'inherit' : repo.scanBranches ? 'on' : 'off'})`);
+        }
+    } else {
+        console.log(`[MCP]   Repositories: none configured`);
+    }
 
     // Log provider-specific configuration without exposing sensitive data
     switch (config.embeddingProvider) {

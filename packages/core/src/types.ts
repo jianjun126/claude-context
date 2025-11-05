@@ -11,4 +11,10 @@ export interface SemanticSearchResult {
     endLine: number;
     language: string;
     score: number;
+    repo?: string;
+    branch?: string;
+    baseBranch?: string;
+    path?: string;
+    kind?: string;
+    summary?: string;
 }

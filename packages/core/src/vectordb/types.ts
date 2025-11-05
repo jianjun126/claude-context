@@ -8,6 +8,12 @@ export interface VectorDocument {
     endLine: number;
     fileExtension: string;
     metadata: Record<string, any>;
+    repo?: string;
+    branch?: string;
+    baseBranch?: string;
+    path?: string;
+    kind?: string;
+    summary?: string;
 }
 
 export interface SearchOptions {

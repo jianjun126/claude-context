@@ -73,8 +73,8 @@ class ContextMcpServer {
 
         // Initialize managers
         this.snapshotManager = new SnapshotManager();
-        this.syncManager = new SyncManager(this.context, this.snapshotManager);
-        this.toolHandlers = new ToolHandlers(this.context, this.snapshotManager);
+        this.syncManager = new SyncManager(this.context, this.snapshotManager, config);
+        this.toolHandlers = new ToolHandlers(this.context, this.snapshotManager, config);
 
         // Load existing codebase snapshot on startup
         this.snapshotManager.loadCodebaseSnapshot();
@@ -114,6 +114,34 @@ This tool is versatile and can be used before completing various tasks to retrie
 ✨ **Usage Guidance**:
 - If the codebase is not indexed, this tool will return a clear error message indicating that indexing is required first.
 - You can then use the index_codebase tool to index the codebase before searching again.
+`;
+
+        const repo_search_description = `
+Perform semantic code search across an indexed repository with branch awareness.
+
+⚠️ **IMPORTANT**:
+- The repository must be indexed via index_codebase before using this tool.
+
+✨ **How it works**:
+- Prioritizes results from the specified (or detected) branch.
+- Falls back to other branches in the same repository when needed.
+- Can scope results to a specific folder within the repo.
+`;
+
+        const repo_list_branches_description = `
+List available branches for a configured repository.
+
+✨ **Usage Guidance**:
+- Use before repo.search to confirm branch names.
+- Supports optional inclusion of remote tracking branches.
+`;
+
+        const repo_branch_summary_description = `
+Summarize the changes on a branch relative to its base branch.
+
+✨ **Usage Guidance**:
+- Helpful for generating context-aware summaries across branches.
+- Uses git diff statistics and recent commit messages.
 `;
 
         // Define available tools
@@ -221,6 +249,82 @@ This tool is versatile and can be used before completing various tasks to retrie
                             required: ["path"]
                         }
                     },
+                    {
+                        name: "repo.search",
+                        description: repo_search_description,
+                        inputSchema: {
+                            type: "object",
+                            properties: {
+                                repo: {
+                                    type: "string",
+                                    description: "Optional: Configured repository name. Defaults to the server's default repo or single configured repo."
+                                },
+                                branch: {
+                                    type: "string",
+                                    description: "Optional: Branch to prioritize. Defaults to the current branch detected for the repo."
+                                },
+                                baseBranch: {
+                                    type: "string",
+                                    description: "Optional: Base branch for context. Defaults to repository/base configuration."
+                                },
+                                query: {
+                                    type: "string",
+                                    description: "Natural language query to search for across the repository."
+                                },
+                                limit: {
+                                    type: "number",
+                                    description: "Maximum number of results per branch grouping (1-50).",
+                                    default: 10,
+                                    maximum: 50
+                                },
+                                path: {
+                                    type: "string",
+                                    description: "Optional: Relative or absolute path within the repository to scope results to."
+                                }
+                            },
+                            required: ["query"]
+                        }
+                    },
+                    {
+                        name: "repo.listBranches",
+                        description: repo_list_branches_description,
+                        inputSchema: {
+                            type: "object",
+                            properties: {
+                                repo: {
+                                    type: "string",
+                                    description: "Optional: Configured repository name. Defaults to the server's default repo or single configured repo."
+                                },
+                                includeRemote: {
+                                    type: "boolean",
+                                    description: "Whether to include remote tracking branches in the response.",
+                                    default: false
+                                }
+                            }
+                        }
+                    },
+                    {
+                        name: "repo.branchSummary",
+                        description: repo_branch_summary_description,
+                        inputSchema: {
+                            type: "object",
+                            properties: {
+                                repo: {
+                                    type: "string",
+                                    description: "Optional: Configured repository name. Defaults to the server's default repo or single configured repo."
+                                },
+                                branch: {
+                                    type: "string",
+                                    description: "Branch to summarize relative to the repository's base branch."
+                                },
+                                baseBranch: {
+                                    type: "string",
+                                    description: "Optional: Override base branch for the summary comparison."
+                                }
+                            },
+                            required: ["branch"]
+                        }
+                    },
                 ]
             };
         });
@@ -238,6 +342,12 @@ This tool is versatile and can be used before completing various tasks to retrie
                     return await this.toolHandlers.handleClearIndex(args);
                 case "get_indexing_status":
                     return await this.toolHandlers.handleGetIndexingStatus(args);
+                case "repo.search":
+                    return await this.toolHandlers.handleRepoSearch(args);
+                case "repo.listBranches":
+                    return await this.toolHandlers.handleRepoListBranches(args);
+                case "repo.branchSummary":
+                    return await this.toolHandlers.handleRepoBranchSummary(args);
 
                 default:
                     throw new Error(`Unknown tool: ${name}`);

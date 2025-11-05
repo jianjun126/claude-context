@@ -8,7 +8,8 @@ import {
     CodebaseInfo,
     CodebaseInfoIndexing,
     CodebaseInfoIndexed,
-    CodebaseInfoIndexFailed
+    CodebaseInfoIndexFailed,
+    CodebaseMetadataFields
 } from "./config.js";
 
 export class SnapshotManager {
@@ -21,6 +22,42 @@ export class SnapshotManager {
     constructor() {
         // Initialize snapshot file path
         this.snapshotFilePath = path.join(os.homedir(), '.context', 'mcp-codebase-snapshot.json');
+    }
+
+    private applyMetadata<T extends CodebaseInfo>(info: T, metadata?: CodebaseMetadataFields, existing?: CodebaseInfo): T {
+        if (!metadata && !existing) {
+            return info;
+        }
+
+        const result: any = { ...info };
+        const sources: Array<CodebaseMetadataFields | undefined> = [];
+
+        if (existing) {
+            const existingMetadata: CodebaseMetadataFields = {
+                repo: (existing as any).repo,
+                branch: (existing as any).branch,
+                baseBranch: (existing as any).baseBranch,
+                path: (existing as any).path,
+                kind: (existing as any).kind,
+                summary: (existing as any).summary,
+            };
+            sources.push(existingMetadata);
+        }
+
+        if (metadata) {
+            sources.push(metadata);
+        }
+
+        const keys: (keyof CodebaseMetadataFields)[] = ['repo', 'branch', 'baseBranch', 'path', 'kind', 'summary'];
+        for (const key of keys) {
+            for (const source of sources) {
+                if (source && source[key] !== undefined && source[key] !== null) {
+                    result[key] = source[key];
+                }
+            }
+        }
+
+        return result as T;
     }
 
     /**
@@ -237,31 +274,31 @@ export class SnapshotManager {
     /**
      * @deprecated Use setCodebaseIndexing() instead for v2 format support
      */
-    public addIndexingCodebase(codebasePath: string, progress: number = 0): void {
+    public addIndexingCodebase(codebasePath: string, progress: number = 0, metadata?: CodebaseMetadataFields): void {
         this.indexingCodebases.set(codebasePath, progress);
 
         // Also update codebaseInfoMap for v2 compatibility
-        const info: CodebaseInfoIndexing = {
+        const info: CodebaseInfoIndexing = this.applyMetadata({
             status: 'indexing',
             indexingPercentage: progress,
             lastUpdated: new Date().toISOString()
-        };
+        }, metadata, this.codebaseInfoMap.get(codebasePath));
         this.codebaseInfoMap.set(codebasePath, info);
     }
 
     /**
      * @deprecated Use setCodebaseIndexing() instead for v2 format support
      */
-    public updateIndexingProgress(codebasePath: string, progress: number): void {
+    public updateIndexingProgress(codebasePath: string, progress: number, metadata?: CodebaseMetadataFields): void {
         if (this.indexingCodebases.has(codebasePath)) {
             this.indexingCodebases.set(codebasePath, progress);
 
             // Also update codebaseInfoMap for v2 compatibility
-            const info: CodebaseInfoIndexing = {
+            const info: CodebaseInfoIndexing = this.applyMetadata({
                 status: 'indexing',
                 indexingPercentage: progress,
                 lastUpdated: new Date().toISOString()
-            };
+            }, metadata, this.codebaseInfoMap.get(codebasePath));
             this.codebaseInfoMap.set(codebasePath, info);
         }
     }
@@ -278,7 +315,7 @@ export class SnapshotManager {
     /**
      * @deprecated Use setCodebaseIndexed() instead for v2 format support
      */
-    public addIndexedCodebase(codebasePath: string, fileCount?: number): void {
+    public addIndexedCodebase(codebasePath: string, fileCount?: number, metadata?: CodebaseMetadataFields): void {
         if (!this.indexedCodebases.includes(codebasePath)) {
             this.indexedCodebases.push(codebasePath);
         }
@@ -287,13 +324,13 @@ export class SnapshotManager {
         }
 
         // Also update codebaseInfoMap for v2 compatibility
-        const info: CodebaseInfoIndexed = {
+        const info: CodebaseInfoIndexed = this.applyMetadata({
             status: 'indexed',
             indexedFiles: fileCount || 0,
             totalChunks: 0, // Unknown in v1 method
             indexStatus: 'completed',
             lastUpdated: new Date().toISOString()
-        };
+        }, metadata, this.codebaseInfoMap.get(codebasePath)) as CodebaseInfoIndexed;
         this.codebaseInfoMap.set(codebasePath, info);
     }
 
@@ -332,7 +369,7 @@ export class SnapshotManager {
     /**
      * Set codebase to indexing status
      */
-    public setCodebaseIndexing(codebasePath: string, progress: number = 0): void {
+    public setCodebaseIndexing(codebasePath: string, progress: number = 0, metadata?: CodebaseMetadataFields): void {
         this.indexingCodebases.set(codebasePath, progress);
 
         // Remove from other states
@@ -340,11 +377,11 @@ export class SnapshotManager {
         this.codebaseFileCount.delete(codebasePath);
 
         // Update info map
-        const info: CodebaseInfoIndexing = {
+        const info: CodebaseInfoIndexing = this.applyMetadata({
             status: 'indexing',
             indexingPercentage: progress,
             lastUpdated: new Date().toISOString()
-        };
+        }, metadata, this.codebaseInfoMap.get(codebasePath));
         this.codebaseInfoMap.set(codebasePath, info);
     }
 
@@ -353,7 +390,8 @@ export class SnapshotManager {
      */
     public setCodebaseIndexed(
         codebasePath: string,
-        stats: { indexedFiles: number; totalChunks: number; status: 'completed' | 'limit_reached' }
+        stats: { indexedFiles: number; totalChunks: number; status: 'completed' | 'limit_reached' },
+        metadata?: CodebaseMetadataFields
     ): void {
         // Add to indexed list if not already there
         if (!this.indexedCodebases.includes(codebasePath)) {
@@ -366,13 +404,13 @@ export class SnapshotManager {
         // Update file count and info
         this.codebaseFileCount.set(codebasePath, stats.indexedFiles);
 
-        const info: CodebaseInfoIndexed = {
+        const info: CodebaseInfoIndexed = this.applyMetadata({
             status: 'indexed',
             indexedFiles: stats.indexedFiles,
             totalChunks: stats.totalChunks,
             indexStatus: stats.status,
             lastUpdated: new Date().toISOString()
-        };
+        }, metadata, this.codebaseInfoMap.get(codebasePath)) as CodebaseInfoIndexed;
         this.codebaseInfoMap.set(codebasePath, info);
     }
 
@@ -382,7 +420,8 @@ export class SnapshotManager {
     public setCodebaseIndexFailed(
         codebasePath: string,
         errorMessage: string,
-        lastAttemptedPercentage?: number
+        lastAttemptedPercentage?: number,
+        metadata?: CodebaseMetadataFields
     ): void {
         // Remove from other states
         this.indexedCodebases = this.indexedCodebases.filter(path => path !== codebasePath);
@@ -390,12 +429,12 @@ export class SnapshotManager {
         this.codebaseFileCount.delete(codebasePath);
 
         // Update info map
-        const info: CodebaseInfoIndexFailed = {
+        const info: CodebaseInfoIndexFailed = this.applyMetadata({
             status: 'indexfailed',
             errorMessage: errorMessage,
             lastAttemptedPercentage: lastAttemptedPercentage,
             lastUpdated: new Date().toISOString()
-        };
+        }, metadata, this.codebaseInfoMap.get(codebasePath)) as CodebaseInfoIndexFailed;
         this.codebaseInfoMap.set(codebasePath, info);
     }
 

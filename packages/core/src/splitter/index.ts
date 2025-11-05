@@ -6,6 +6,12 @@ export interface CodeChunk {
         endLine: number;
         language?: string;
         filePath?: string;
+        repo?: string;
+        branch?: string;
+        baseBranch?: string;
+        path?: string;
+        kind?: string;
+        summary?: string;
     };
 }
 
